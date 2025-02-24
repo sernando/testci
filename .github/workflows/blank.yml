@@ -34,4 +34,4 @@ jobs:
           echo Add other actions to build,
           echo test, and deploy your project.
       - name: Run local script
-        run: sh hello.sh
+        run: sh ./hello.sh

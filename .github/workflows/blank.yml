@@ -32,7 +32,7 @@ jobs:
         run: sh ./start.sh
         
       - name: Run local script
-        run:  |
+        run: |
           source ./env-prepare.sh
           sh ./server/build.sh
           sh ./server/container.sh

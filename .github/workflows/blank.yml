@@ -34,5 +34,4 @@ jobs:
       - name: Run local script
         run: |
           source ./env-prepare.sh
-          sh ./server/build.sh
           sh ./server/container.sh

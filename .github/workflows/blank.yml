@@ -20,10 +20,9 @@ jobs:
         run: sh ./start.sh
         
       - name: Run local script
-        run: source ./env-prepare.sh
-
-      - name: Run local script
-        run: sh ./client/build.sh
+        run: |
+          source ./env-prepare.sh
+          sh ./client/build.sh
         
   build-server:
     if: ${{ github.event.inputs.job_type == 'build-server' }}
@@ -33,10 +32,7 @@ jobs:
         run: sh ./start.sh
         
       - name: Run local script
-        run: source ./env-prepare.sh
-
-      - name: build server
-        run: sh ./server/build.sh
-
-      - name: container server
-        run: sh ./server/container.sh
+        run:  |
+          source ./env-prepare.sh
+          sh ./server/build.sh
+          sh ./server/container.sh

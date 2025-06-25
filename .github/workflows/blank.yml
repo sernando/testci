@@ -1,5 +1,3 @@
-# This is a basic workflow to help you get started with Actions
-
 name: CI
 
 # Controls when the workflow will run
@@ -10,28 +8,225 @@ on:
   # pull_request:
   #   branches: [ "main" ]
 
-  # Allows you to run this workflow manually from the Actions tab11
+  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
+    inputs:
+      job_type:
+        description: "Select the type of job"
+        required: true
+        default: "build-all"
+        type: choice
+        options:
+          - build-dev-apk
+          - build-test-apk
+          - build-server
+          - build-test
+          - build-all
+      branch:
+        description: "Select branch to build"
+        required: true
+        default: "master"
+        type: choice
+        options:
+          - master
+          - manual-package
+  schedule:
+    # 每天 UTC 15:30 触发完整构建 (开发APK + 测试APK + 服务器)
+    - cron: '30 15 * * *'
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
-    runs-on: self-hosted
-    # Steps represent a sequence of tasks that will be executed as part of the job
+  prepare:
+    runs-on: build-runner
+    outputs:
+      ref_name: ${{ steps.set-ref.outputs.ref_name }}
+      sha: ${{ steps.set-ref.outputs.sha }}
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      # - uses: actions/checkout@v4
-
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Fetch & Copy
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
-      - name: Run local script
-        run: sh hello.sh
+          sh ./prepare-job.sh \
+            "${{ github.event_name }}" \
+            "${{ github.event.inputs.job_type }}" \
+            "${{ github.event.inputs.branch }}"
+
+      - name: Set ref and sha from local
+        id: set-ref
+        run: |
+          sh ./get-git-info.sh \
+            "${{ github.event_name }}" \
+            "${{ github.event.inputs.job_type }}" \
+            "${{ github.event.inputs.branch }}"
+
+
+  # 单独构建：开发版APK
+  build-dev-apk-only:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.job_type == 'build-dev-apk' }}
+    needs: prepare
+    runs-on: build-runner
+    steps:
+      - name: Build Development APK Only
+        run: |
+          echo "🚀 Building Development APK Only..."
+          source ~/.zshrc
+          source ./env-prepare.sh
+          sh ./client/build-dev.sh
+
+  # 单独构建：测试版APK
+  build-test-apk-only:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.job_type == 'build-test-apk' }}
+    needs: prepare
+    runs-on: build-runner
+    steps:
+      - name: Build Test APK Only
+        run: |
+          echo "🚀 Building Test APK Only..."
+          source ~/.zshrc
+          source ./env-prepare.sh
+          sh ./client/build.sh
+
+  # 单独构建：服务器
+  build-server-only:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.job_type == 'build-server' }}
+    needs: prepare
+    runs-on: build-runner
+    steps:
+      - name: Build Server Only
+        run: |
+          echo "🚀 Building Server Only..."
+          source ./env-prepare.sh
+          sh ./server/build.sh
+          sh ./server/container.sh
+
+  # 阶段1：服务器构建 (用于test和all场景)
+  build-server-stage:
+    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.job_type == 'build-test' || github.event.inputs.job_type == 'build-all') || github.event_name == 'schedule' }}
+    needs: prepare
+    runs-on: build-runner
+    outputs:
+      server_status: ${{ steps.server-build.outcome }}
+    steps:
+      - name: Build Server Stage
+        id: server-build
+        run: |
+          echo "🖥️ Stage 1: Building Server..."
+          source ./env-prepare.sh
+          sh ./server/build.sh
+          sh ./server/container.sh
+          echo "✅ Server build completed!"
+
+  # 阶段2A：测试APK构建 (用于test和all场景)
+  build-test-apk-stage:
+    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.job_type == 'build-test' || github.event.inputs.job_type == 'build-all') || github.event_name == 'schedule' }}
+    needs: prepare
+    runs-on: build-runner
+    outputs:
+      test_apk_status: ${{ steps.test-apk-build.outcome }}
+    steps:
+      - name: Build Test APK Stage
+        id: test-apk-build
+        run: |
+          echo "📱 Stage 2A: Building Test APK..."
+          source ~/.zshrc
+          source ./env-prepare.sh
+          sh ./client/build.sh
+          echo "✅ Test APK build completed!"
+
+  # 阶段2B：开发APK构建 (仅用于all场景，依赖测试APK完成)
+  build-dev-apk-stage:
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.job_type == 'build-all') || github.event_name == 'schedule' }}
+    needs: [prepare, build-test-apk-stage]
+    runs-on: build-runner
+    outputs:
+      dev_apk_status: ${{ steps.dev-apk-build.outcome }}
+    steps:
+      - name: Build Dev APK Stage
+        id: dev-apk-build
+        run: |
+          echo "📱 Stage 2B: Building Development APK (after Test APK)..."
+          source ~/.zshrc
+          source ./env-prepare.sh
+          sh ./client/build-dev.sh
+          echo "✅ Development APK build completed!"
+
+  # 测试构建完成通知 (Server + Test APK)
+  build-test-complete:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.job_type == 'build-test' }}
+    needs: [build-server-stage, build-test-apk-stage]
+    runs-on: build-runner
+    steps:
+      - name: Test Build Summary
+        run: |
+          echo "🧪 Test Build Summary"
+          echo "Server Status: ${{ needs.build-server-stage.outputs.server_status }}"
+          echo "Test APK Status: ${{ needs.build-test-apk-stage.outputs.test_apk_status }}"
+          
+          if [[ "${{ needs.build-server-stage.outputs.server_status }}" == "success" && "${{ needs.build-test-apk-stage.outputs.test_apk_status }}" == "success" ]]; then
+            echo "🎉 Test build completed successfully!"
+          else
+            echo "❌ Test build had failures"
+            exit 1
+          fi
+
+  # 完整构建完成通知 (Server + Test APK + Dev APK)
+  build-all-complete:
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.job_type == 'build-all') || github.event_name == 'schedule' }}
+    needs: [build-server-stage, build-test-apk-stage, build-dev-apk-stage]
+    runs-on: build-runner
+    steps:
+      - name: All Build Summary
+        run: |
+          echo "🚀 All Build Summary"
+          echo "Server Status: ${{ needs.build-server-stage.outputs.server_status }}"
+          echo "Test APK Status: ${{ needs.build-test-apk-stage.outputs.test_apk_status }}"
+          echo "Dev APK Status: ${{ needs.build-dev-apk-stage.outputs.dev_apk_status }}"
+          
+          if [[ "${{ needs.build-server-stage.outputs.server_status }}" == "success" && "${{ needs.build-test-apk-stage.outputs.test_apk_status }}" == "success" && "${{ needs.build-dev-apk-stage.outputs.dev_apk_status }}" == "success" ]]; then
+            echo "🎉 All builds completed successfully!"
+          else
+            echo "❌ Some builds had failures"
+            exit 1
+          fi
+
+  # 统一通知任务
+  notify:
+    if: ${{ always() }}
+    needs: [prepare, build-dev-apk-only, build-test-apk-only, build-server-only, build-test-complete, build-all-complete]
+    runs-on: build-runner
+    steps:
+      - name: Send Build Notification
+        run: |
+          # 确定实际执行的构建类型
+          JOB_TYPE="${{ github.event.inputs.job_type || 'build-all' }}"
+          
+          # 根据不同的构建类型设置不同的状态
+          case "$JOB_TYPE" in
+            "build-dev-apk")
+              BUILD_STATUS="${{ needs.build-dev-apk-only.result }}"
+              ;;
+            "build-test-apk")
+              BUILD_STATUS="${{ needs.build-test-apk-only.result }}"
+              ;;
+            "build-server")
+              BUILD_STATUS="${{ needs.build-server-only.result }}"
+              ;;
+            "build-test")
+              BUILD_STATUS="${{ needs.build-test-complete.result }}"
+              ;;
+            "build-all")
+              BUILD_STATUS="${{ needs.build-all-complete.result }}"
+              ;;
+            *)
+              BUILD_STATUS="unknown"
+              ;;
+          esac
+          
+          sh ./send-notifications.sh \
+            "${{ github.event_name }}" \
+            "$JOB_TYPE" \
+            "${{ github.workflow }}" \
+            "${{ github.repository }}" \
+            "${{ needs.prepare.outputs.ref_name }}" \
+            "${{ needs.prepare.outputs.sha }}" \
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            "${{ secrets.FEISHU_WEBHOOK_URL }}" \
+            "$BUILD_STATUS"
+
